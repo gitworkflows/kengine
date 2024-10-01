@@ -1,0 +1,199 @@
+version: 2
+
+before:
+  hooks:
+    # Clean up previous builds and dependencies
+    - rm -rf kengine-build kengine-dist vendor
+    # Vendor the Kengine dependencies
+    - go mod vendor
+    - mkdir -p kengine-build
+    - cp cmd/kengine/main.go kengine-build/main.go
+    - /bin/sh -c 'cd ./kengine-build && go mod init kengine'
+    # Prepare syso files for Windows embedding
+    - go install github.com/khulnasoft/xkengine/cmd/xkengine@latest
+    - /bin/sh -c 'for a in amd64 arm arm64; do XKENGINE_SKIP_BUILD=1 GOOS=windows GOARCH=$a $GOPATH/bin/xkengine build {{.Env.TAG}}; done'
+    - /bin/sh -c 'mv /tmp/buildenv_*/*.syso kengine-build'
+    # Add kengine module as a requirement with the current tag
+    - go mod edit -require=github.com/khulnasoft/kengine/v2@{{.Env.TAG}} ./kengine-build/go.mod
+    # Tidy the module files for Go 1.16+ to ensure dependencies are clean
+    - /bin/sh -c 'cd ./kengine-build && go mod tidy'
+    # Vendor the dependencies of the module prepared for build
+    - /bin/sh -c 'cd ./kengine-build && go mod vendor'
+    # Clone distribution assets
+    - git clone --depth 1 https://github.com/khulnasoft/kengine-dist kengine-dist
+    - mkdir -p kengine-dist/man
+    # Generate the manpages and completion scripts
+    - go run cmd/kengine/main.go manpage --directory ./kengine-dist/man
+    - gzip -r ./kengine-dist/man/
+    - /bin/sh -c 'go run cmd/kengine/main.go completion bash > ./kengine-dist/scripts/bash-completion'
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+      - GO111MODULE=on
+    dir: ./kengine-build
+    binary: kengine
+    goos:
+      - darwin
+      - linux
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - arm
+      - arm64
+      - s390x
+      - ppc64le
+      - riscv64
+    goarm:
+      - "5"
+      - "6"
+      - "7"
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: darwin
+        goarch: ppc64le
+      - goos: darwin
+        goarch: s390x
+      - goos: darwin
+        goarch: riscv64
+      - goos: windows
+        goarch: ppc64le
+      - goos: windows
+        goarch: s390x
+      - goos: windows
+        goarch: riscv64
+      - goos: freebsd
+        goarch: ppc64le
+      - goos: freebsd
+        goarch: s390x
+      - goos: freebsd
+        goarch: riscv64
+      - goos: freebsd
+        goarch: arm
+        goarm: "5"
+    flags:
+      - -trimpath
+      - -mod=readonly
+    ldflags:
+      - -s -w
+    tags:
+      - nobadger
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: '{{ trimsuffix (trimsuffix .Env.artifact ".zip") ".tar.gz" }}.pem'
+    args:
+      [
+        "sign-blob",
+        "--yes",
+        "--output-signature=${signature}",
+        "--output-certificate=${certificate}",
+        "${artifact}",
+      ]
+    artifacts: all
+
+sboms:
+  - artifacts: binary
+    documents:
+      - >-
+        {{ .ProjectName }}_
+        {{- .Version }}_
+        {{- if eq .Os "darwin" }}mac{{ else }}{{ .Os }}{{ end }}_
+        {{- .Arch }}
+        {{- with .Arm }}v{{ . }}{{ end }}
+        {{- with .Mips }}_{{ . }}{{ end }}
+        {{- if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}.sbom
+    cmd: syft
+    args: ["$artifact", "--file", "${document}", "--output", "cyclonedx-json"]
+
+archives:
+  - id: default
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- if eq .Os "darwin" }}mac{{ else }}{{ .Os }}{{ end }}_
+      {{- .Arch }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+      {{- with .Mips }}_{{ . }}{{ end }}
+      {{- if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
+
+  # Package the 'kengine-build' directory into a tarball,
+  # allowing users to build the exact same set of files as ours.
+  - id: source
+    meta: true
+    name_template: "{{ .ProjectName }}_{{ .Version }}_buildable-artifact"
+    files:
+      - src: LICENSE
+        dst: ./LICENSE
+      - src: README.md
+        dst: ./README.md
+      - src: AUTHORS
+        dst: ./AUTHORS
+      - src: ./kengine-build
+        dst: ./
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_src"
+  format: "tar.gz"
+  files:
+    - vendor
+
+checksum:
+  algorithm: sha512
+
+nfpms:
+  - id: default
+    package_name: kengine
+    vendor: Dyanim
+    homepage: https://khulnasoft.com
+    maintainer: Matthew Holt <mholt@users.noreply.github.com>
+    description: |
+      Kengine - Powerful, enterprise-ready, open source web server with automatic HTTPS written in Go
+    license: Apache 2.0
+    formats:
+      - deb
+      # - rpm
+    bindir: /usr/bin
+    contents:
+      - src: ./kengine-dist/init/kengine.service
+        dst: /lib/systemd/system/kengine.service
+      - src: ./kengine-dist/init/kengine-api.service
+        dst: /lib/systemd/system/kengine-api.service
+      - src: ./kengine-dist/welcome/index.html
+        dst: /usr/share/kengine/index.html
+      - src: ./kengine-dist/scripts/bash-completion
+        dst: /etc/bash_completion.d/kengine
+      - src: ./kengine-dist/config/Kenginefile
+        dst: /etc/kengine/Kenginefile
+        type: config
+      - src: ./kengine-dist/man/*
+        dst: /usr/share/man/man8/
+    scripts:
+      postinstall: ./kengine-dist/scripts/postinstall.sh
+      preremove: ./kengine-dist/scripts/preremove.sh
+      postremove: ./kengine-dist/scripts/postremove.sh
+
+release:
+  github:
+    owner: khulnasoft
+    name: kengine
+  draft: true
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^ci:"
+      - "^docs?:"
+      - "^readme:"
+      - "^tests?:"
+      - '^\w+\s+' # remove commit messages without colons that don't correspond to a package

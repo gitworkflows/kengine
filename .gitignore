@@ -1,0 +1,31 @@
+_gitignore/
+*.log
+Kenginefile
+Kenginefile.*
+!kenginefile/
+!kenginefile.go
+
+# artifacts from pprof tooling
+*.prof
+*.test
+
+# build artifacts and helpers
+cmd/kengine/kengine
+cmd/kengine/kengine.exe
+cmd/kengine/tmp/*.exe
+cmd/kengine/.env
+
+# mac specific
+.DS_Store
+
+# go modules
+vendor
+
+# goreleaser artifacts
+dist
+kengine-build
+kengine-dist
+
+# IDE files
+.idea/
+.vscode/
